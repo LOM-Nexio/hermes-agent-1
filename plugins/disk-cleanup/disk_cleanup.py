@@ -37,7 +37,7 @@ def is_safe_path(path: Path) -> bool:
     hermes_home = get_hermes_home()
     try:
         resolved = path.resolve()
-    except OSError:
+    except (OSError, RuntimeError):
         return False
     try:
         resolved.relative_to(hermes_home)
