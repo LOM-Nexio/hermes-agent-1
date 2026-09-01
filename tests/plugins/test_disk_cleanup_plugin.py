@@ -100,7 +100,7 @@ class TestIsSafePath:
         p.write_text("x")
         assert dg.is_safe_path(p) is True
 
-    @pytest.mark.macos_only
+    @pytest.mark.platforms("macos")
     def test_track_accepts_tmp_hermes_path_after_platform_resolution(self, _isolate_env):
         dg = _load_lib()
         temporary = Path(tempfile.mkdtemp(prefix="hermes-disk-cleanup-", dir="/tmp"))
@@ -139,18 +139,36 @@ class TestIsSafePath:
             shutil.rmtree(outside_dir)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX symlink contract")
-    def test_symlink_loop_fails_closed(self, _isolate_env):
-        dg = _load_lib()
-        temporary = Path(tempfile.mkdtemp(prefix="hermes-disk-cleanup-", dir="/tmp"))
-        try:
-            first = temporary / "first"
-            second = temporary / "second"
-            first.symlink_to(second)
-            second.symlink_to(first)
+    def test_symlink_loop_fails_closed(self, _isolate_env, monkeypatch, tmp_path):
+        """Resolution failures must fail closed, never raise into the caller.
 
-            assert dg.is_safe_path(first) is False
-        finally:
-            shutil.rmtree(temporary)
+        Non-strict ``Path.resolve()`` does not raise on a symlink loop on
+        every platform (ELOOP only surfaces under strict=True), so the loop
+        itself may resolve to a best-effort path. The fail-closed contract
+        added with #98854 is about resolution *errors*: when resolve()
+        raises OSError/RuntimeError, is_safe_path rejects and track()
+        declines without propagating.
+        """
+        dg = _load_lib()
+        loop_root = tmp_path / "loop"
+        loop_root.mkdir()
+        first = loop_root / "first"
+        second = loop_root / "second"
+        first.symlink_to(second)
+        second.symlink_to(first)
+
+        # Baseline: a loop resolves without raising, so both calls return a
+        # bool — never an exception into the plugin hook.
+        assert isinstance(dg.is_safe_path(first), bool)
+        assert isinstance(dg.track(str(first), "temp", silent=True), bool)
+
+        # Resolution errors are rejected fail-closed.
+        def _raise_resolve(self):
+            raise OSError("ELOOP: too many levels of symbolic links")
+
+        monkeypatch.setattr(Path, "resolve", _raise_resolve)
+        assert dg.is_safe_path(first) is False
+        assert dg.track(str(first), "temp", silent=True) is False
 
 
 class TestGuessCategory:

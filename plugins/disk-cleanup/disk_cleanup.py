@@ -48,7 +48,9 @@ def is_safe_path(path: Path) -> bool:
     # Allow /tmp/hermes-* explicitly. Compare resolved roots rather than raw
     # path parts because macOS resolves /tmp to /private/tmp.
     try:
-        relative_tmp = resolved.relative_to(Path("/tmp").resolve())
+        # Deliberate /tmp alias detection (#98854): we resolve the POSIX root
+        # itself so the same directory matches under /private/tmp.
+        relative_tmp = resolved.relative_to(Path("/tmp").resolve())  # no-tmp: ok — alias detection, not a scratch path
     except (ValueError, OSError):
         return False
     return bool(relative_tmp.parts and relative_tmp.parts[0].startswith("hermes-"))
@@ -170,7 +172,13 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
     if category not in ALLOWED_CATEGORIES:
         _log(f"WARN: unknown category '{category}', using 'other'")
         category = "other"
-    path = Path(path_str).resolve()
+
+    try:
+        path = Path(path_str).resolve()
+    except (OSError, RuntimeError):
+        _log(f"REJECT: {path_str} (could not resolve path)")
+        return False
+
     if not path.exists():
         _log(f"SKIP: {path} (does not exist)")
         return False
