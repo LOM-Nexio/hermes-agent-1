@@ -2251,7 +2251,11 @@ class MatrixAdapter(BasePlatformAdapter):
         is_direct = bool(getattr(getattr(event, "content", None), "is_direct", False))
         inviter = str(getattr(event, "sender", ""))
         # Only authorized inviters — otherwise any federated user could pull the bot into rooms.
-        if not self._is_authorized_user(inviter):
+        # Our OWN invites always count: provisioning (add-nexio-person / room setup) creates rooms
+        # as the bot and invites from that account, and the bot is not in MATRIX_ALLOWED_USERS
+        # (that list is who may TALK to it). Without this the bot refuses the rooms it just made
+        # and sits outside them with a pending invite forever.
+        if inviter != str(self._user_id) and not self._is_authorized_user(inviter):
             logger.warning("Matrix: rejecting invite to %s from unauthorized user %s", room_id, inviter)
             return
         logger.info("Matrix: invited to %s — joining (is_direct=%s)", room_id, is_direct)
