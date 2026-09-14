@@ -1194,12 +1194,91 @@ class MatrixAdapter(BasePlatformAdapter):
         logger.error("Matrix: failed to %s E2EE client: %s. %s", what, exc, _E2EE_INSTALL_HINT)
         return await self._abort_connect(api)
 
+    async def _bootstrap_cross_signing_uia(self, olm: Any, client: Any) -> str:
+        """generate_recovery_key(), but able to answer the homeserver's UIA challenge.
+
+        Publishing cross-signing keys is a user-interactive endpoint: Synapse answers
+        401 with an m.login.password flow. mautrix's generate_recovery_key() passes no
+        auth, so it dies on that 401 and the bot can never rebuild its identity. This
+        mirrors the same steps and retries the publish with the password from
+        MATRIX_PASSWORD.
+        """
+        import json as _json
+        import re as _re
+        from mautrix.crypto.cross_signing_key import CrossSigningSeeds
+
+        password = os.getenv("MATRIX_PASSWORD", "")
+        seeds = CrossSigningSeeds.generate()
+        ssss_key = await olm.ssss.generate_and_upload_key(None)
+        await olm._upload_cross_signing_keys_to_ssss(ssss_key, seeds)
+        keys = seeds.to_keys()
+        try:
+            await olm._publish_cross_signing_keys(keys)
+        except Exception as exc:
+            text = str(exc)
+            if "401" not in text:
+                raise
+            if not password:
+                raise RuntimeError(
+                    "publishing cross-signing keys needs user-interactive auth; set "
+                    "MATRIX_PASSWORD in the profile .env so the bot can answer it") from exc
+            match = _re.search(r'\{.*\}', text, _re.S)
+            session = ""
+            if match:
+                try:
+                    session = (_json.loads(match.group(0)) or {}).get("session", "")
+                except Exception:
+                    session = ""
+            localpart = str(client.mxid).lstrip("@").split(":")[0]
+            auth = {
+                "type": "m.login.password",
+                "identifier": {"type": "m.id.user", "user": localpart},
+                "password": password,
+            }
+            if session:
+                auth["session"] = session
+            logger.info("Matrix: answering the cross-signing UIA challenge with MATRIX_PASSWORD")
+            await olm._publish_cross_signing_keys(keys, auth=auth)
+        await olm.ssss.set_default_key_id(ssss_key.id)
+        await olm.sign_own_device(olm.own_identity)
+        logger.info("Matrix: cross-signing identity published and own device self-signed")
+        # Persist the new key over the dead one, otherwise the next restart fails
+        # verification again and mints yet another identity — a fresh master key on
+        # every boot, which would invalidate the user's trust each time.
+        self._store_recovery_key_in_env(ssss_key.recovery_key)
+        return ssss_key.recovery_key
+
+    def _store_recovery_key_in_env(self, recovery_key: str) -> None:
+        """Replace MATRIX_RECOVERY_KEY in the active profile's .env. Never logged."""
+        try:
+            # store dir is <profile>/platforms/matrix/store, so the profile root is 3 up
+            env_path = self._resolve_store_dir().parents[2] / ".env"
+            if not env_path.exists():
+                logger.warning("Matrix: cannot persist recovery key — %s not found", env_path.name)
+                return
+            lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            out, replaced = [], False
+            for line in lines:
+                if line.startswith("MATRIX_RECOVERY_KEY="):
+                    out.append("MATRIX_RECOVERY_KEY=" + recovery_key)
+                    replaced = True
+                else:
+                    out.append(line)
+            if not replaced:
+                out.append("MATRIX_RECOVERY_KEY=" + recovery_key)
+            env_path.write_text("\n".join(out) + "\n", encoding="utf-8")
+            logger.info("Matrix: new recovery key written to the profile .env "
+                        "(value not logged); restarts will now verify instead of re-bootstrapping")
+        except Exception as exc:
+            logger.warning("Matrix: could not write the new recovery key to .env: %s", exc)
+
     async def _verify_or_bootstrap_cross_signing(self, olm: Any, client: Any) -> None:
         """Verify cross-signing via MATRIX_RECOVERY_KEY, or bootstrap a new key (non-fatal)."""
         # Honor the active profile's secret scope so a secondary profile under gateway.multiplex_profiles
         # resolves its own recovery key instead of the default profile's (which fails E2EE verification with
         # "Key MAC does not match", #69090).
         recovery_key = _scoped_recovery_key()
+        unlock_failed = False
         if recovery_key:
             try:
                 await olm.verify_with_recovery_key(recovery_key)
@@ -1210,6 +1289,7 @@ class MatrixAdapter(BasePlatformAdapter):
                 # SSSS was wiped (e.g. by a deactivate/reactivate cycle) kept an orphaned
                 # master key forever and Element could never trust it. Fall through to the
                 # same check-and-bootstrap path used when no key is configured at all.
+                unlock_failed = True
                 logger.warning(
                     "Matrix: recovery key verification failed (%s) — checking whether "
                     "cross-signing needs bootstrapping", exc)
@@ -1218,7 +1298,15 @@ class MatrixAdapter(BasePlatformAdapter):
         except Exception as exc:
             own_xsign = None
             logger.warning("Matrix: cross-signing key lookup failed: %s", exc)
-        if own_xsign is None:
+        # Public keys on the server do NOT mean we can use them: after an SSSS wipe the
+        # master key is still published but its PRIVATE half is gone, so the bot can
+        # sign nothing and Element can never trust it. Treat a failed unlock as
+        # "unusable" and rebuild the identity.
+        if own_xsign is not None and unlock_failed:
+            logger.warning(
+                "Matrix: cross-signing public keys exist but could not be unlocked — "
+                "the private half is gone, rebuilding the identity")
+        if own_xsign is None or unlock_failed:
             _, output_error = _get_matrix_recovery_key_output_target()
             if output_error:
                 reason = {
@@ -1233,7 +1321,7 @@ class MatrixAdapter(BasePlatformAdapter):
                     *([output_error] if output_error not in ("not_configured", "exists") else []))
             else:
                 try:
-                    new_recovery_key = await olm.generate_recovery_key()
+                    new_recovery_key = await self._bootstrap_cross_signing_uia(olm, client)
                     _handle_generated_matrix_recovery_key(str(client.mxid), new_recovery_key)
                     logger.info("Matrix: bootstrapped a fresh cross-signing identity; "
                                 "update MATRIX_RECOVERY_KEY from the output file")
