@@ -39,6 +39,15 @@ from typing import Any, Dict, Optional, Set
 
 from agent.secret_scope import UnscopedSecretError, get_secret
 
+# E2EE crypto backend. python-olm (libolm C library) has never shipped a Windows
+# wheel and is deprecated upstream; fresholm is a Rust/vodozemac drop-in whose
+# import hook redirects `import olm` to a compat shim, so mautrix.crypto works
+# unchanged. This MUST execute before any mautrix.crypto import — OlmMachine and
+# five sibling modules do a bare `import olm` at module load. No-op when fresholm
+# is absent (then E2EE needs python-olm as before).
+with suppress(ImportError):
+    import fresholm.import_hook  # noqa: F401
+
 try:
     from mautrix.types import (
         ContentURI, EventID, EventType, PresenceState, RoomCreatePreset, RoomID, TrustState, UserID)
@@ -362,7 +371,8 @@ _STARTUP_GRACE_SECONDS = 5  # ignore messages older than this many seconds befor
 
 _OUTBOUND_MENTION_RE = re.compile(r"(?<![\w/])(@[0-9A-Za-z._=/-]+:[0-9A-Za-z.-]+(?::\d+)?)")
 
-_E2EE_INSTALL_HINT = "Install with: pip install 'mautrix[encryption]' asyncpg aiosqlite  (requires libolm C library)"
+_E2EE_INSTALL_HINT = ("Install with: uv pip install mautrix fresholm unpaddedbase64 pycryptodome base58 asyncpg aiosqlite"
+                      "  (fresholm = vodozemac-backed olm replacement; python-olm/libolm not required)")
 
 _MATRIX_IMAGE_FILENAME_EXTS = frozenset({
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".svg", ".heic", ".heif", ".avif"})
@@ -779,6 +789,9 @@ class MatrixAdapter(BasePlatformAdapter):
         self._reset_clock_skew_detector()
         self._last_sync_ts: float = 0.0
         self._dm_rooms: Dict[str, bool] = {}
+        # SAS verification is only wired when E2EE is actually enabled; stays None
+        # otherwise so the E2EE-off path is untouched.
+        self._verifier: Any = None
         self._room_identities: Dict[str, MatrixRoomIdentity] = {}
         self._room_identity_cached_at: Dict[str, float] = {}
         self._room_identity_ttl_seconds = _env_number("MATRIX_ROOM_IDENTITY_TTL_SECONDS", 60.0, float)
@@ -1162,6 +1175,7 @@ class MatrixAdapter(BasePlatformAdapter):
                 logger.warning("Matrix: share_keys() warning during startup: %s", exc)
             await self._verify_or_bootstrap_cross_signing(olm, client)
             client.crypto = olm
+            self._setup_verification(client)
             logger.info(
                 "Matrix: E2EE enabled (store: %s%s)", str(self._crypto_db_path),
                 f", device_id={client.device_id}" if client.device_id else "")
@@ -1190,35 +1204,45 @@ class MatrixAdapter(BasePlatformAdapter):
             try:
                 await olm.verify_with_recovery_key(recovery_key)
                 logger.info("Matrix: cross-signing verified via recovery key")
+                return
             except Exception as exc:
-                logger.warning("Matrix: recovery key verification failed: %s", exc)
-        else:
-            try:
-                own_xsign = await olm.get_own_cross_signing_public_keys()
-            except Exception as exc:
-                own_xsign = None
-                logger.warning("Matrix: cross-signing key lookup failed: %s", exc)
-            if own_xsign is None:
-                _, output_error = _get_matrix_recovery_key_output_target()
-                if output_error:
-                    reason = {
-                        "not_configured": "is not configured. Configure MATRIX_RECOVERY_KEY from your Matrix client "
-                                          "or set MATRIX_RECOVERY_KEY_OUTPUT_FILE to write a new recovery key once "
-                                          "with mode 0600.",
-                        "exists": "already exists and will not be overwritten.",
-                    }.get(output_error, "is not usable: %s")
+                # A configured-but-DEAD recovery key used to stop here, so a bot whose
+                # SSSS was wiped (e.g. by a deactivate/reactivate cycle) kept an orphaned
+                # master key forever and Element could never trust it. Fall through to the
+                # same check-and-bootstrap path used when no key is configured at all.
+                logger.warning(
+                    "Matrix: recovery key verification failed (%s) — checking whether "
+                    "cross-signing needs bootstrapping", exc)
+        try:
+            own_xsign = await olm.get_own_cross_signing_public_keys()
+        except Exception as exc:
+            own_xsign = None
+            logger.warning("Matrix: cross-signing key lookup failed: %s", exc)
+        if own_xsign is None:
+            _, output_error = _get_matrix_recovery_key_output_target()
+            if output_error:
+                reason = {
+                    "not_configured": "is not configured. Configure MATRIX_RECOVERY_KEY from your Matrix client "
+                                      "or set MATRIX_RECOVERY_KEY_OUTPUT_FILE to write a new recovery key once "
+                                      "with mode 0600.",
+                    "exists": "already exists and will not be overwritten.",
+                }.get(output_error, "is not usable: %s")
+                logger.warning(
+                    "Matrix: cross-signing keys are missing, but automatic bootstrap is skipped because "
+                    "MATRIX_RECOVERY_KEY_OUTPUT_FILE " + reason,
+                    *([output_error] if output_error not in ("not_configured", "exists") else []))
+            else:
+                try:
+                    new_recovery_key = await olm.generate_recovery_key()
+                    _handle_generated_matrix_recovery_key(str(client.mxid), new_recovery_key)
+                    logger.info("Matrix: bootstrapped a fresh cross-signing identity; "
+                                "update MATRIX_RECOVERY_KEY from the output file")
+                except Exception as exc:
                     logger.warning(
-                        "Matrix: cross-signing keys are missing, but automatic bootstrap is skipped because "
-                        "MATRIX_RECOVERY_KEY_OUTPUT_FILE " + reason,
-                        *([output_error] if output_error not in ("not_configured", "exists") else []))
-                else:
-                    try:
-                        new_recovery_key = await olm.generate_recovery_key()
-                        _handle_generated_matrix_recovery_key(str(client.mxid), new_recovery_key)
-                    except Exception as exc:
-                        logger.warning(
-                            "Matrix: cross-signing bootstrap failed (non-fatal — Element will show "
-                            "'not verified by its owner'): %s", exc)
+                        "Matrix: cross-signing bootstrap failed (non-fatal — Element will show "
+                        "'not verified by its owner'): %s", exc)
+        else:
+            logger.info("Matrix: cross-signing public keys present; no bootstrap needed")
 
     async def _connect_initial_sync(self, client: Any) -> None:
         """Full initial sync: seed joined rooms, DM cache, and dispatch queued to-device events."""
@@ -2022,6 +2046,15 @@ class MatrixAdapter(BasePlatformAdapter):
         body = source_content.get("body", "") or ""
         if not body:
             return
+        # An in-flight SAS verification consumes "match"/"yes"/"no" before the agent
+        # sees it, so confirming a device never reads as a chat message.
+        if self._verifier is not None:
+            try:
+                if await self._verifier.handle_chat_reply(sender, body):
+                    logger.info("Matrix: verification — consumed chat confirmation from %s", sender)
+                    return
+            except Exception as exc:
+                logger.warning("Matrix: verification chat-reply handling failed: %s", exc)
         msg_event = await self._build_inbound_event(
             room_id, sender, event_id, _normalize_matrix_bang_command(body), source_content, relates_to)
         if msg_event is None:
@@ -2587,6 +2620,96 @@ class MatrixAdapter(BasePlatformAdapter):
         self._room_identities[room_id] = identity
         self._room_identity_cached_at[room_id] = time.monotonic()
         return identity
+
+    def _setup_verification(self, client: Any) -> None:
+        """Wire SAS (emoji) verification. mautrix 0.21.1 implements none of
+        m.key.verification.*, so without this Element's Verify dialog hangs."""
+        try:
+            from .verification import SasVerifier
+        except ImportError:
+            from verification import SasVerifier  # plugin dir on sys.path
+        try:
+            self._verifier = SasVerifier(
+                client=client,
+                own_user=str(self._user_id or ""),
+                own_device=str(client.device_id or ""),
+                is_authorized=self._is_authorized_user,
+                send_message=self._send_verification_message,
+                on_verified=self._persist_verified_device,
+            )
+            self._verifier.register(client)
+        except Exception as exc:
+            self._verifier = None
+            logger.warning("Matrix: verification setup failed (Verify will hang): %s", exc)
+
+    async def _send_verification_message(self, user_id: str, text: str) -> None:
+        """Deliver verification text to that person's DM room."""
+        room_id = await self._dm_room_for(user_id)
+        if not room_id:
+            logger.warning("Matrix: verification — no DM room found for %s, cannot show emoji", user_id)
+            return
+        await self.send(room_id, text)
+
+    async def _dm_room_for(self, user_id: str) -> str:
+        """Their DM room id: m.direct first, then any joined 2-person room."""
+        dm_data = await self._fetch_m_direct(require_dict=True)
+        if isinstance(dm_data, dict):
+            rooms = dm_data.get(user_id) or []
+            if rooms:
+                return str(rooms[0])
+        try:  # fall back to a joined room we share with exactly them
+            joined = await self._client.get_joined_rooms()
+            for room_id in joined or []:
+                members = await self._client.get_joined_members(room_id)
+                ids = set(members or {})
+                if ids == {user_id, str(self._user_id)}:
+                    return str(room_id)
+        except Exception as exc:
+            logger.debug("Matrix: verification DM lookup fallback failed: %s", exc)
+        return ""
+
+    async def _persist_verified_device(self, user_id: str, device_id: str) -> None:
+        """Record the verified device so trust survives a restart, and mark it in
+        the crypto store when the API allows."""
+        import json as _json
+        path = self._resolve_store_dir() / "verified_devices.json"
+        try:
+            data = _json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+        except Exception:
+            data = {}
+        data.setdefault(user_id, [])
+        if device_id not in data[user_id]:
+            data[user_id].append(device_id)
+        try:
+            path.write_text(_json.dumps(data, indent=2), encoding="utf-8")
+            logger.info("Matrix: verification — recorded %s/%s in %s", user_id, device_id, path.name)
+        except Exception as exc:
+            logger.warning("Matrix: verification — could not persist verified device: %s", exc)
+        crypto = getattr(self._client, "crypto", None)
+        store = getattr(crypto, "crypto_store", None) or getattr(crypto, "store", None)
+        for name in ("get_device", "get_or_fetch_device"):
+            getter = getattr(store, name, None) or getattr(crypto, name, None)
+            if not callable(getter):
+                continue
+            try:
+                dev = getter(user_id, device_id)
+                if dev is not None and hasattr(dev, "__await__"):
+                    dev = await dev
+                if dev is None:
+                    continue
+                if hasattr(dev, "trust"):
+                    from mautrix.crypto import TrustState
+                    dev.trust = TrustState.VERIFIED
+                putter = getattr(store, "put_device", None)
+                if callable(putter):
+                    res = putter(user_id, dev)
+                    if hasattr(res, "__await__"):
+                        await res
+                logger.info("Matrix: verification — marked %s/%s VERIFIED in the crypto store",
+                            user_id, device_id)
+                return
+            except Exception as exc:
+                logger.debug("Matrix: verification — crypto-store trust update via %s failed: %s", name, exc)
 
     async def _is_dm_room(self, room_id: str) -> bool:
         return (await self._resolve_room_identity(room_id)).chat_type == "dm"
