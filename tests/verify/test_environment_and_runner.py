@@ -10,8 +10,6 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import pytest
-
 from agent.verify.environment import (
     load_manifest,
     load_or_detect,
