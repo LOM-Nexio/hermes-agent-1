@@ -233,10 +233,8 @@ def _remove_entry(store: Store, entry_name: str, *, attempts: int = 5) -> None:
             if entry.is_symlink() or not entry.is_dir():
                 entry.unlink(missing_ok=True)
             else:
-                # PortableGit ships etc/hosts read-only, and Windows refuses to unlink
-                # a read-only file, so a bare rmtree raised WinError 5 and aborted the
-                # whole update ("install failed: [WinError 5] Access is denied"). The
-                # retry loop cannot help: the read-only bit is not a transient hold.
+                # Windows refuses to unlink read-only files (PortableGit ships etc/hosts
+                # read-only); no retry clears that bit, so the tree could never be removed.
                 rmtree_force(entry)
             return
         except FileNotFoundError:
