@@ -114,6 +114,11 @@ def test_real_shared_group_child_does_not_signal_us(monkeypatch):
 
 
 @pytest.mark.platforms("posix")
+@pytest.mark.live_system_guard_bypass  # the grandchild reparents to init once the
+# parent dies; signalling a reparented descendant is exactly the contract under
+# test, and the guard's subtree walk races with the reparenting (blocked kills
+# surfaced as a 1-2% CI flake: psutil's os.kill routes through the guard after
+# the parent kill has landed).
 def test_real_shared_group_child_descendants_are_killed(tmp_path):
     """A shared-group child's descendants can hold the capture pipe's write
     end open past proc.kill() (the #68915 communicate() hang), so the
