@@ -15,6 +15,7 @@ from typing import Optional
 
 from pm import paths
 from pm.downloader import DownloadPaused, ProgressFn
+from pm.filesystem import remove_tree
 from pm.lock import Facts, Lockfile
 from pm.package import InstallError, Package, Runner, StatePackage, compose_env
 from pm.plugin_inputs import Candidates, Members, PluginInput, Selection, StagedUpdate
@@ -225,17 +226,13 @@ def _remove_entry(store: Store, entry_name: str, *, attempts: int = 5) -> None:
     """
     import time
 
-    from hermes_cli.fs_utils import rmtree_force
-
     entry = store.entry(entry_name)
     for attempt in range(attempts):
         try:
             if entry.is_symlink() or not entry.is_dir():
                 entry.unlink(missing_ok=True)
             else:
-                # Windows refuses to unlink read-only files (PortableGit ships etc/hosts
-                # read-only); no retry clears that bit, so the tree could never be removed.
-                rmtree_force(entry)
+                remove_tree(entry)
             return
         except FileNotFoundError:
             return

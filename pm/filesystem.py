@@ -9,7 +9,9 @@ import errno
 import hashlib
 import os
 from pathlib import Path
+import shutil
 import stat
+import sys
 import tempfile
 import time
 
@@ -80,3 +82,18 @@ def durable_write_bytes(path: Path, data: bytes) -> None:
                 os.close(directory)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def remove_tree(path: Path) -> None:
+    """``shutil.rmtree`` that clears a read-only bit and retries the failing unlink.
+
+    Windows refuses to unlink read-only files (PortableGit ships ``etc/hosts`` read-only), and no
+    retry clears that bit. Lives here, not in ``hermes_cli``: PM installs run before the rest of
+    the tree exists (the Docker toolchain stage copies only ``pm/``).
+    """
+    def _retry_writable(func, failed, _exc):
+        os.chmod(failed, stat.S_IWRITE)
+        func(failed)
+
+    handler = {"onexc": _retry_writable} if sys.version_info >= (3, 12) else {"onerror": _retry_writable}
+    shutil.rmtree(path, **handler)
