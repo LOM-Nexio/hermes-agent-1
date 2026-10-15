@@ -233,6 +233,23 @@ class PetAdapter(BasePlatformAdapter):
                 event.message_type = MessageType.PHOTO
                 if not event.text:
                     event.text = _NO_TEXT
+        # The relay attaches what we remember about this person (their working
+        # preferences). Prefix it as context so the model always has it, instead
+        # of hoping it decides to call a memory tool. Applied last, so it can
+        # never turn an otherwise-empty message into a dispatchable one.
+        memory = str(frame.get("memory") or "").strip()
+        # Never on a slash command: '/new' must reach the gateway as a command, not as text.
+        if memory and event.text and not event.text.lstrip().startswith("/"):
+            event.text = "\n".join([
+                "[Remembered working preferences for this person. This is context,"
+                " not something they just said. Follow it unless this message says"
+                " otherwise.]",
+                memory,
+                "[end remembered preferences]",
+                "",
+                event.text,
+            ])
+
         if not event.text:
             return None
         return event
