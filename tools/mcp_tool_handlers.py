@@ -303,7 +303,22 @@ async def _track_inflight_rpc(server: Any, server_name: str, op: str):
             inflight.discard(task)
 
 
-async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str, args: dict):
+def _session_meta(server) -> Optional[dict]:
+    """``_meta`` naming whose turn this call serves, for servers configured with
+    ``forward_session: true`` (one key, many people: the server acts as that person). Read on
+    the caller's thread because the session ContextVars do not reach the MCP loop."""
+    cfg = getattr(server, "_config", None)
+    if not (isinstance(cfg, dict) and cfg.get("forward_session") is True):
+        return None
+    from gateway.session_context import get_session_env
+    user_id = get_session_env("HERMES_SESSION_USER_ID")
+    if not user_id:
+        return None
+    return {"hermes/session": {"platform": get_session_env("HERMES_SESSION_PLATFORM"), "user_id": user_id}}
+
+
+async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str, args: dict,
+                                        meta: Optional[dict] = None):
     """``session.call_tool`` that fails fast when the stdio child is/gets dead: pre-call (a dead
     child must not hold the slot for the full timeout) and mid-call (race against
     ``_watch_stdio_children``). Both raise :class:`_StdioChildExited` for the respawn path, which
@@ -317,7 +332,7 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
             f"MCP stdio subprocess for '{server_name}' had already exited when the call was dispatched",
             in_flight=False,
         )
-    _call_coro = server.session.call_tool(tool_name, arguments=args)
+    _call_coro = server.session.call_tool(tool_name, arguments=args, **({"meta": meta} if meta else {}))
     _watch_children = getattr(server, "_watch_stdio_children", None)
     if not (inspect.iscoroutinefunction(_watch_children) and asyncio.iscoroutine(_call_coro)):
         # Stubbed sessions return a non-awaitable, or there is no child-watcher to race: plain await.
@@ -471,12 +486,13 @@ def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float):
         server, error = _acquire_call_server(server_name, tool_timeout)
         if server is None:
             return error
+        meta = _session_meta(server)
 
         async def _call():
             async with server._rpc_lock, _track_inflight_rpc(server, server_name, op):
                 server._pending_call_context = contextvars.copy_context()  # for the elicitation callback
                 try:
-                    result = await _call_tool_racing_stdio_death(server, server_name, tool_name, args)
+                    result = await _call_tool_racing_stdio_death(server, server_name, tool_name, args, meta)
                 finally:
                     server._pending_call_context = None
             if getattr(server, "_mark_session_proven", None) is not None:  # round-trip done: transport healthy

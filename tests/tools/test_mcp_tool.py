@@ -690,6 +690,42 @@ class TestToolHandler:
         finally:
             _servers.pop("test_srv", None)
 
+    def _call_in_session(self, config, platform="pet", user_id="u-ada"):
+        """Run one tool call inside a bound gateway session; return the call_tool mock."""
+        import contextvars
+        from gateway.session_context import set_session_vars
+        from tools.mcp_tool_handlers import _make_tool_handler
+        from tools.mcp_tool import _servers
+
+        mock_session = MagicMock()
+        mock_session.call_tool = AsyncMock(return_value=_make_call_result("ok", is_error=False))
+        server = _make_mock_server("test_srv", session=mock_session)
+        server._config = config
+        _servers["test_srv"] = server
+
+        def run():
+            set_session_vars(platform=platform, user_id=user_id)
+            with self._patch_mcp_loop():
+                return _make_tool_handler("test_srv", "greet", 120)({})
+        try:
+            contextvars.copy_context().run(run)
+        finally:
+            _servers.pop("test_srv", None)
+        return mock_session.call_tool
+
+    def test_forward_session_sends_who_the_call_is_for(self):
+        call_tool = self._call_in_session({"forward_session": True})
+        call_tool.assert_called_once_with(
+            "greet", arguments={}, meta={"hermes/session": {"platform": "pet", "user_id": "u-ada"}})
+
+    def test_session_is_not_forwarded_unless_configured(self):
+        """Who is talking must never leak to a server that did not ask for it."""
+        for config in ({}, {"forward_session": "yes"}):
+            self._call_in_session(config).assert_called_once_with("greet", arguments={})
+
+    def test_forward_session_without_a_user_sends_no_meta(self):
+        self._call_in_session({"forward_session": True}, user_id="").assert_called_once_with("greet", arguments={})
+
 
     def test_recycled_stdio_server_reconnects_lazily_on_tool_call(self):
         from tools.mcp_tool_handlers import _make_tool_handler
