@@ -85,6 +85,10 @@ def user_id_for(chat_id: str) -> str:
     return chat_id[len(CHAT_PREFIX):] if chat_id.startswith(CHAT_PREFIX) else chat_id
 
 
+def _is_reset(event: MessageEvent) -> bool:
+    return event.get_command() in {"new", "reset"}
+
+
 class PetAdapter(BasePlatformAdapter):
     """WebSocket client to the Nexio MCP pet relay."""
 
@@ -99,6 +103,7 @@ class PetAdapter(BasePlatformAdapter):
         self._ws: Optional["aiohttp.ClientWebSocketResponse"] = None
         self._listen_task: Optional[asyncio.Task] = None
         self._send_lock = asyncio.Lock()
+        self._resetting: set = set()  # chat ids whose last message was /new: no typing frames
 
     # -- Connection lifecycle -------------------------------------------------
 
@@ -259,7 +264,7 @@ class PetAdapter(BasePlatformAdapter):
         # (model, provider, tip) so it never lands as the new chat's first message.
         async def quiet_reset(event: MessageEvent):
             response = await handler(event)
-            return None if event.get_command() in {"new", "reset"} else response
+            return None if _is_reset(event) else response
         super().set_message_handler(quiet_reset)
 
     async def _dispatch(self, frame: Dict[str, Any]) -> None:
@@ -267,6 +272,12 @@ class PetAdapter(BasePlatformAdapter):
         if event is None:
             return
         logger.debug("[%s] inbound from %s: %s", self.name, event.user_id, event.text[:80])
+        # With the banner dropped nothing would clear a typing frame, so the app's "Thinking" would hang.
+        # Stay quiet until this person's next real message.
+        if _is_reset(event):
+            self._resetting.add(event.source.chat_id)
+        else:
+            self._resetting.discard(event.source.chat_id)
         await self.handle_message(event)
 
     # -- Outbound -----------------------------------------------------------
@@ -300,6 +311,8 @@ class PetAdapter(BasePlatformAdapter):
         return SendResult(success=False, error="relay not connected", retryable=True)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
+        if chat_id in self._resetting:
+            return
         await self._send_frame({"type": "typing", "user_id": user_id_for(chat_id)})
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
