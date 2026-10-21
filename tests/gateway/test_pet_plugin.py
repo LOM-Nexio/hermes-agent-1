@@ -77,6 +77,17 @@ class TestInbound:
         ev = a.handle_message.await_args.args[0]
         assert ev.source.chat_id == "dm:u-bob"
 
+    @pytest.mark.asyncio
+    async def test_new_chat_banner_is_dropped_but_still_resets(self, monkeypatch):
+        a = _adapter(monkeypatch)
+        gateway = AsyncMock(return_value="Session reset! Starting fresh.")
+        a.set_message_handler(gateway)
+        ev = lambda text: a.build_event({"type": "message", "id": "m4", "text": text, "user_id": "u-ada"})
+        assert await a._message_handler(ev("/new")) is None
+        assert await a._message_handler(ev("/reset")) is None
+        assert gateway.await_count == 2
+        assert await a._message_handler(ev("hello")) == "Session reset! Starting fresh."
+
 
 class TestOutbound:
     @pytest.mark.asyncio

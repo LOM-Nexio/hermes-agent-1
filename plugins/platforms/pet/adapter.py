@@ -254,6 +254,14 @@ class PetAdapter(BasePlatformAdapter):
             return None
         return event
 
+    def set_message_handler(self, handler) -> None:
+        # The pet app shows its own "Started a new chat."; drop Hermes's /new banner
+        # (model, provider, tip) so it never lands as the new chat's first message.
+        async def quiet_reset(event: MessageEvent):
+            response = await handler(event)
+            return None if event.get_command() in {"new", "reset"} else response
+        super().set_message_handler(quiet_reset)
+
     async def _dispatch(self, frame: Dict[str, Any]) -> None:
         event = self.build_event(frame)
         if event is None:
