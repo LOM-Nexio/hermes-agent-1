@@ -85,6 +85,10 @@ def user_id_for(chat_id: str) -> str:
     return chat_id[len(CHAT_PREFIX):] if chat_id.startswith(CHAT_PREFIX) else chat_id
 
 
+def _is_reset(event: MessageEvent) -> bool:
+    return event.get_command() in {"new", "reset"}
+
+
 class PetAdapter(BasePlatformAdapter):
     """WebSocket client to the Nexio MCP pet relay."""
 
@@ -99,6 +103,7 @@ class PetAdapter(BasePlatformAdapter):
         self._ws: Optional["aiohttp.ClientWebSocketResponse"] = None
         self._listen_task: Optional[asyncio.Task] = None
         self._send_lock = asyncio.Lock()
+        self._resetting: set = set()  # chat ids whose last message was /new: no typing frames
 
     # -- Connection lifecycle -------------------------------------------------
 
@@ -259,7 +264,7 @@ class PetAdapter(BasePlatformAdapter):
         # (model, provider, tip) so it never lands as the new chat's first message.
         async def quiet_reset(event: MessageEvent):
             response = await handler(event)
-            return None if event.get_command() in {"new", "reset"} else response
+            return None if _is_reset(event) else response
         super().set_message_handler(quiet_reset)
 
     async def _dispatch(self, frame: Dict[str, Any]) -> None:
@@ -267,6 +272,12 @@ class PetAdapter(BasePlatformAdapter):
         if event is None:
             return
         logger.debug("[%s] inbound from %s: %s", self.name, event.user_id, event.text[:80])
+        # With the banner dropped nothing would clear a typing frame, so the app's "Thinking" would hang.
+        # Stay quiet until this person's next real message.
+        if _is_reset(event):
+            self._resetting.add(event.source.chat_id)
+        else:
+            self._resetting.discard(event.source.chat_id)
         await self.handle_message(event)
 
     # -- Outbound -----------------------------------------------------------
@@ -299,7 +310,14 @@ class PetAdapter(BasePlatformAdapter):
             return SendResult(success=True, message_id=message_id)
         return SendResult(success=False, error="relay not connected", retryable=True)
 
+    async def send_private_notice(self, chat_id: str, user_id: Optional[str], content: str,
+                                  reply_to: Optional[str] = None, metadata=None) -> SendResult:
+        logger.debug("[%s] dropped gateway notice for %s: %s", self.name, chat_id, content[:80])
+        return SendResult(success=True)
+
     async def send_typing(self, chat_id: str, metadata=None) -> None:
+        if chat_id in self._resetting:
+            return
         await self._send_frame({"type": "typing", "user_id": user_id_for(chat_id)})
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
@@ -315,7 +333,9 @@ def _env_enablement() -> Optional[dict]:
     url = os.getenv("PET_RELAY_URL", "").strip()
     if not url:
         return None
-    seed: dict = {"relay_url": url.rstrip("/")}
+    # notice_delivery=private routes gateway setup notices (home channel, etc.) to send_private_notice,
+    # which drops them: staff should only ever see Nexio, never the agent underneath.
+    seed: dict = {"relay_url": url.rstrip("/"), "notice_delivery": "private"}
     home = os.getenv("PET_HOME_CHANNEL", "").strip()
     if home:
         seed["home_channel"] = {"chat_id": chat_id_for(home), "name": os.getenv("PET_HOME_CHANNEL_NAME", "Nexio Pet")}
@@ -389,6 +409,15 @@ def register(ctx) -> None:
             "the project, the day's other jobs and clickable date chips; use it whenever someone asks "
             "to schedule, find dates for, or move a project: call lom_quick_schedule(project_id), write "
             "one or two sentences, then the fence with the tool output verbatim. Booking only happens "
-            "when the person confirms a date; then call lom_schedule_and_notify."
+            "when the person confirms a date; then call lom_schedule_and_notify.\n"
+            "You are Nexio. Never mention Hermes, the agent framework, profiles, gateways, home "
+            "channels or slash commands, and never suggest typing a command.\n"
+            "Photo reviews: when someone wants to do photo reviews or asks what reviews they have, "
+            "their queue is the PENDING tasks named 'Review the customer photos' (tasks.task_name, "
+            "status 'pending', snoozed_until null or past) on projects that are not archived. Do not "
+            "use the Photos Received project stage. Query it with lom_run_query, newest task first, "
+            "and list project number, customer, city and how long it has waited. Then work through "
+            "them one at a time: show the photos from lom_get_project_photos as https images, run "
+            "lom_review_intake_photos(project_id) and give its recommendation in a line or two."
         ),
     )
