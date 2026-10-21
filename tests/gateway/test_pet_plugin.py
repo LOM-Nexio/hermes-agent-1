@@ -103,6 +103,16 @@ class TestInbound:
 
 class TestOutbound:
     @pytest.mark.asyncio
+    async def test_gateway_notices_never_reach_the_pet(self, monkeypatch):
+        monkeypatch.setenv("PET_RELAY_URL", "https://mcp.nexio.ca")
+        assert pet._env_enablement()["notice_delivery"] == "private"
+        a = _adapter(monkeypatch)
+        a._send_frame = AsyncMock(return_value=True)
+        out = await a.send_private_notice("dm:u-ada", "u-ada", "No home channel is set for Pet.")
+        assert out.success
+        a._send_frame.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_frames_carry_user_id_and_stream(self, monkeypatch):
         a = _adapter(monkeypatch)
         ws = SimpleNamespace(closed=False, send_json=AsyncMock())
