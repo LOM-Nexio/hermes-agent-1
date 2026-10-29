@@ -296,7 +296,16 @@ class PetAdapter(BasePlatformAdapter):
     def supports_draft_streaming(self, chat_type=None, metadata=None, chat_id=None) -> bool:
         return True
 
+    @staticmethod
+    def _is_noop(content: str) -> bool:
+        """A live-call turn with nothing to act on: the model answers NOOP and the pet never sees it.
+        Drafts stream in pieces, so any prefix of NOOP is held back too."""
+        t = (content or "").strip().strip("`*.")
+        return bool(t) and "NOOP".startswith(t.upper())
+
     async def send_draft(self, chat_id: str, draft_id: int, content: str, metadata=None) -> SendResult:
+        if self._is_noop(content):
+            return SendResult(success=True, message_id=f"draft:{draft_id}")
         ok = await self._send_frame({"type": "draft", "user_id": user_id_for(chat_id), "draft_id": draft_id,
                                      "text": content[: self.MAX_MESSAGE_LENGTH]})
         return SendResult(success=ok, error=None if ok else "relay not connected", retryable=not ok)
@@ -304,6 +313,8 @@ class PetAdapter(BasePlatformAdapter):
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
                    metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         message_id = uuid.uuid4().hex[:12]
+        if self._is_noop(content):
+            return SendResult(success=True, message_id=message_id)
         ok = await self._send_frame({"type": "message", "user_id": user_id_for(chat_id), "message_id": message_id,
                                      "text": content[: self.MAX_MESSAGE_LENGTH], "reply_to": reply_to})
         if ok:
@@ -418,6 +429,14 @@ def register(ctx) -> None:
             "use the Photos Received project stage. Query it with lom_run_query, newest task first, "
             "and list project number, customer, city and how long it has waited. Then work through "
             "them one at a time: show the photos from lom_get_project_photos as https images, run "
-            "lom_review_intake_photos(project_id) and give its recommendation in a line or two."
+            "lom_review_intake_photos(project_id) and give its recommendation in a line or two.\n"
+            "Live calls: while the person is on a phone call, lines of it arrive as messages that start "
+            "with '[Live call'. They are a transcript, not a request to you. Read them for something "
+            "concrete your tools can do right now, for example find the customer by name or phone, open "
+            "the project they mention, run lom_quick_schedule when they talk about booking or moving a "
+            "visit, pull the quote or photos they refer to. Do it without being asked and reply in one "
+            "or two lines with the result, so it is on the screen before the staff member asks. If "
+            "there is nothing useful to do yet, reply with exactly NOOP and nothing else; that reply is "
+            "never shown. Never speak to the caller and never say you are listening."
         ),
     )
