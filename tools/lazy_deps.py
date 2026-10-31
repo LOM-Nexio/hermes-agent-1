@@ -131,7 +131,15 @@ LAZY_DEPS: dict[str, tuple[str, ...]] = {
         "aiohttp==3.14.3",
     ),
     "platform.matrix": (
-        "mautrix[encryption]==0.21.1",
+        # E2EE without python-olm/libolm (no Windows wheels, deprecated upstream):
+        # fresholm is the vodozemac-backed drop-in, activated by the import hook in
+        # plugins/platforms/matrix/adapter.py. Never list mautrix[encryption] here —
+        # it drags python-olm back in and fails to build on Windows.
+        "mautrix==0.21.1",
+        "fresholm==0.3.1",
+        "unpaddedbase64==2.1.0",
+        "pycryptodome==3.23.0",
+        "base58==2.1.1",
         "aiosqlite==0.22.1",
         "asyncpg==0.31.0",
         "aiohttp-socks==0.11.0",

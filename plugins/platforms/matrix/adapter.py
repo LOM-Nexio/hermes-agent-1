@@ -1612,18 +1612,26 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def send_voice(
         self, chat_id: str, audio_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        metadata: Optional[Dict[str, Any]] = None, is_voice: bool = True, **kwargs: Any) -> SendResult:
         """Upload audio as an MSC3245 voice message. Voice bubbles need Ogg/Opus but callers pass any
-        format (e.g. TTS output), so transcode here — best-effort: without ffmpeg the original is sent."""
+        format (e.g. TTS output), so transcode here — best-effort: without ffmpeg the original is sent.
+
+        ``is_voice=False`` means the caller wants a plain audio attachment (a music file the agent
+        produced, say) rather than a voice bubble, so skip the transcode and the voice metadata.
+
+        ``**kwargs`` absorbs newer base-adapter arguments the way the whatsapp/signal/qq adapters
+        already do. Without it this raised "unexpected keyword argument 'is_voice'" and every TTS
+        reply was dropped AFTER the audio had been generated and paid for.
+        """
         converted_path: Optional[str] = None
-        if not str(audio_path).lower().endswith((".ogg", ".oga", ".opus")):
+        if is_voice and not str(audio_path).lower().endswith((".ogg", ".oga", ".opus")):
             converted_path = await asyncio.to_thread(_matrix_transcode_voice_to_ogg, audio_path)
         try:
             return await self._send_local_file(
                 chat_id, converted_path or audio_path, "m.audio", caption, reply_to,
                 # keep the caller's basename (the temp transcode file has a generated name)
                 file_name=(Path(audio_path).with_suffix(".ogg").name if converted_path else None),
-                metadata=metadata, is_voice=True)
+                metadata=metadata, is_voice=is_voice)
         finally:
             if converted_path:
                 with suppress(OSError):

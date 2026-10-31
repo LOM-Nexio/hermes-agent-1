@@ -168,11 +168,13 @@ _OFF_WORDS = {"off", "disable", "false", "0"}
 # /busy mode -> what Enter does while Hermes is working (status line / post-set explanation).
 _BUSY_MODE_SHORT = {
     "queue": "queues for next turn", "steer": "steers into current run (after next tool call)",
-    "interrupt": "redirects current run immediately"}
+    "interrupt": "redirects current run immediately",
+    "kanban": "files into a to-do on the default Kanban board"}
 _BUSY_MODE_LONG = {
     "queue": "Enter will queue follow-up input while Hermes is busy.",
     "steer": "Enter will steer your message into the current run (after the next tool call).",
     "interrupt": "Enter will redirect the current run while Hermes is busy; /stop still cancels it.",
+    "kanban": "Enter will file your message as a to-do task on the default Kanban board while Hermes is busy.",
 }
 
 # /fast argument -> (service_tier value, persisted config value)

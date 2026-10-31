@@ -110,6 +110,13 @@ class TestDeepseekVSeriesPassThrough:
         result = normalize_model_for_provider("deepseek-v4-pro", "deepseek")
         assert result == "deepseek-v4-pro"
 
+    def test_deepseek_provider_preserves_deepseek_flash(self):
+        """``deepseek-flash`` is the native API's current first-class id (V4.1
+        Flash). It must reach the wire unchanged, not be relabelled
+        ``deepseek-v4-flash`` (the legacy alias), or the desktop header and
+        usage rows report the wrong model."""
+        assert normalize_model_for_provider("deepseek-flash", "deepseek") == "deepseek-flash"
+
 
 # ── DeepSeek post-2026-07-24 alias remapping ───────────────────────────
 

@@ -22,7 +22,9 @@ class DeepSeekProfile(ProviderProfile):
         self, *, reasoning_config: dict | None = None, model: str | None = None, **context
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         m = (model or "").strip().lower()
-        if not m.startswith("deepseek-v") or m.startswith("deepseek-v3"):  # v4+ only; v3 excluded
+        # ``deepseek-flash`` is a first-class v4-class id that does NOT start with
+        # ``deepseek-v`` — treat it like the V-series so thinking/effort still apply.
+        if not (m == "deepseek-flash" or m.startswith("deepseek-v")) or m.startswith("deepseek-v3"):
             return {}, {}
         rc = reasoning_config if isinstance(reasoning_config, dict) else None
         # Always set thinking explicitly (default enabled, matching the API default)
