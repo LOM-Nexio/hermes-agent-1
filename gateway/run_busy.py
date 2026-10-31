@@ -8,6 +8,7 @@ for GatewayRunner (mixin bound via the MRO).
 from __future__ import annotations
 
 import logging
+import sys
 from typing import TYPE_CHECKING
 import asyncio
 import contextlib
@@ -600,6 +601,12 @@ class GatewayBusySessionMixin:
         adapter = self._delivery_adapter_for(event.source)
         if not adapter:
             return
+        if effective_mode == "kanban":
+            # busy_input_mode=kanban: file to the board instead of queueing; fall back to queue
+            # only when the file itself failed so the follow-up is never lost.
+            if await self._file_busy_prompt_to_kanban(event, session_key):
+                return
+            effective_mode = "queue"
         if self._queue_during_drain_enabled(effective_mode):
             self._queue_or_replace_pending_event(session_key, event)
             message = t("gateway.busy.drain_queued", action=self._status_action_gerund())
@@ -621,6 +628,70 @@ class GatewayBusySessionMixin:
             for word in approval_input_words(input_key):
                 words.setdefault(word, verb_args)
         return words
+
+    async def _file_busy_prompt_to_kanban(self, event: MessageEvent, session_key: str) -> bool:
+        """busy_input_mode=kanban: file this busy follow-up as a task on the default kanban board.
+
+        Voice/media are transcribed first (reusing the steer transcription path). Sends a
+        confirmation reply on success. Returns False on ANY failure so callers can fall back to
+        queueing — a busy follow-up must never be silently dropped.
+        """
+        adapter = self._adapter_for_source(event.source)
+        if not adapter:
+            return False
+        try:
+            text = (await self._prepare_busy_steer_text(event) or "").strip()
+            has_media = bool(getattr(event, "media_urls", None)) or bool(getattr(event, "media_types", None))
+            if not text:
+                text = "(non-text follow-up — see original message)" if has_media else ""
+            title = text[:90].replace("\n", " ") or "(empty busy follow-up)"
+            if len(text) > 90:
+                title += "…"
+            body = f"{text}\n\nFiled from busy session {session_key} ({event.source.platform.value})."
+            cmd = [
+                sys.executable, "-m", "hermes_cli.main", "kanban", "--board", "default",
+                "create", title, "--body", body, "--json",
+            ]
+            proc = await asyncio.create_subprocess_exec(
+                *cmd, env=dict(os.environ),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
+            except asyncio.TimeoutError:
+                proc.kill()
+                logger.warning("busy→kanban file timed out for session %s", session_key)
+                return False
+            if proc.returncode != 0:
+                logger.warning(
+                    "busy→kanban file failed rc=%s for session %s: %s",
+                    proc.returncode, session_key, (err or b"").decode("utf-8", "replace")[:300],
+                )
+                return False
+            parsed = {}
+            if out and out.strip():
+                try:
+                    parsed = json.loads(out.decode("utf-8", "replace"))
+                except ValueError:
+                    parsed = {}
+            task_id = parsed.get("id") or parsed.get("task_id") or ""
+            await self._send_busy_reply(
+                event, adapter,
+                f"📌 Busy — filed to the Kanban board as {task_id} “{title}”. "
+                "I'll pick it up once I'm free.",
+            )
+            return True
+        except Exception as exc:
+            logger.warning("busy→kanban file exception for session %s: %s", session_key, exc)
+            return False
+
+    # Bare-word approval replies → (verb, args) for the synthesized slash command.
+    _PLAINTEXT_APPROVAL_WORDS: Dict[str, tuple] = {
+        **{w: ("approve", "") for w in ("approve", "yes", "ok", "okay", "confirm", "y", "👍")},
+        **{w: ("deny", "") for w in ("deny", "no", "reject", "cancel", "n", "👎")},
+        **{w: ("approve", "always") for w in ("always", "approve always", "always approve")},
+        **{w: ("approve", "session") for w in ("session", "approve session", "session approve")},
+    }
 
     async def _route_plaintext_approval_while_busy(self, event: MessageEvent, session_key: str) -> bool:
         """Route a bare "yes"/"no" to the approval handlers while a dangerous-command approval blocks.

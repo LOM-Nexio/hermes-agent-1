@@ -1,0 +1,32 @@
+name: pet-platform
+label: Nexio Pet
+kind: platform
+version: 1.0.0
+description: >
+  Nexio Pet desktop companion adapter for Hermes. Dials out to the Nexio MCP
+  relay (/pet/relay) over a WebSocket, receives staff messages with optional
+  screenshots, and streams replies back. Each staff member is a DM keyed by
+  their Nexio user id; cron jobs and notifications deliver to the same chat.
+author: Lean On Me
+requires_env:
+  - name: PET_RELAY_URL
+    description: "Base URL of the Nexio MCP relay, e.g. https://mcp.nexio.ca or http://127.0.0.1:8000"
+    prompt: "Pet relay base URL"
+    password: false
+  - name: PET_RELAY_SECRET
+    description: "Shared secret the relay expects on /pet/relay (PET_RELAY_SECRET on the MCP side)"
+    prompt: "Pet relay secret"
+    password: true
+optional_env:
+  - name: PET_HOME_CHANNEL
+    description: "Nexio user id that receives cron jobs with no explicit target"
+    prompt: "Home user id"
+    password: false
+  - name: PET_ALLOWED_USERS
+    description: "Comma-separated Nexio user ids allowed to talk to the bot (the relay already gates on role)"
+    prompt: "Allowed users"
+    password: false
+  - name: PET_ALLOW_ALL_USERS
+    description: "Accept every user the relay lets through (recommended: true)"
+    prompt: "Allow all users? (true/false)"
+    password: false

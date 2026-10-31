@@ -87,7 +87,7 @@ _OFF_WORDS = {"off", "disable", "false", "0"}
 
 # /busy modes; what Enter does while Hermes is working lives in the catalog as
 # ``cli.commands.busy.short_<mode>`` (status line) / ``long_<mode>`` (post-set explanation).
-_BUSY_MODES = ("queue", "steer", "interrupt")
+_BUSY_MODES = ("queue", "steer", "interrupt", "kanban")
 
 # /fast argument -> (service_tier value, persisted config value)
 _FAST_TIERS = {
