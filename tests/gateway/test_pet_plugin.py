@@ -166,3 +166,22 @@ class TestOutbound:
         assert calls["url"] == "http://127.0.0.1:8000/pet/deliver"
         assert calls["json"] == {"user_id": "u-ada", "text": "Reminder: call Travis"}
         assert calls["headers"]["Authorization"] == "Bearer s3cret"
+
+
+class TestNoop:
+    def test_noop_exact_only(self):
+        for text in ("NOOP", "noop.", "`NOOP`", " **NOOP** "):
+            assert pet.PetAdapter._is_noop(text), text
+        for text in ("No.", "N", "NO", "NOOP but here is more", ""):
+            assert not pet.PetAdapter._is_noop(text), text
+
+    def test_drafts_hold_back_prefixes(self):
+        for text in ("N", "NO", "NOO", "NOOP"):
+            assert pet.PetAdapter._is_noop(text, partial=True), text
+        assert not pet.PetAdapter._is_noop("No problem", partial=True)
+
+    def test_hint_has_the_card_rules(self):
+        from plugins.platforms.pet import adapter as a
+        src = open(a.__file__, encoding="utf-8").read()
+        assert "never call lom_confirm_write" in src
+        assert "Context turns start with '[Page'" in src

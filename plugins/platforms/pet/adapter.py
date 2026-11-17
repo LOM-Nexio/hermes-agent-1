@@ -297,14 +297,15 @@ class PetAdapter(BasePlatformAdapter):
         return True
 
     @staticmethod
-    def _is_noop(content: str) -> bool:
-        """A live-call turn with nothing to act on: the model answers NOOP and the pet never sees it.
-        Drafts stream in pieces, so any prefix of NOOP is held back too."""
+    def _is_noop(content: str, partial: bool = False) -> bool:
+        """A context turn with nothing to act on: the model answers NOOP and the pet never sees it.
+        Drafts stream in pieces, so a draft holds back any prefix of NOOP; a final message must be
+        exactly NOOP, or real replies like "No." would vanish."""
         t = (content or "").strip().strip("`*.")
-        return bool(t) and "NOOP".startswith(t.upper())
+        return bool(t) and ("NOOP".startswith(t.upper()) if partial else t.upper() == "NOOP")
 
     async def send_draft(self, chat_id: str, draft_id: int, content: str, metadata=None) -> SendResult:
-        if self._is_noop(content):
+        if self._is_noop(content, partial=True):
             return SendResult(success=True, message_id=f"draft:{draft_id}")
         ok = await self._send_frame({"type": "draft", "user_id": user_id_for(chat_id), "draft_id": draft_id,
                                      "text": content[: self.MAX_MESSAGE_LENGTH]})
@@ -419,8 +420,9 @@ def register(ctx) -> None:
             "A ```map fence with the exact JSON returned by lom_quick_schedule draws a Google map with "
             "the project, the day's other jobs and clickable date chips; use it whenever someone asks "
             "to schedule, find dates for, or move a project: call lom_quick_schedule(project_id), write "
-            "one or two sentences, then the fence with the tool output verbatim. Booking only happens "
-            "when the person confirms a date; then call lom_schedule_and_notify.\n"
+            "one or two sentences, then the fence with the tool output verbatim. A date chip the person "
+            "clicks books that date itself; to suggest one date, call lom_schedule_and_notify and it "
+            "shows them a card.\n"
             "You are Nexio. Never mention Hermes, the agent framework, profiles, gateways, home "
             "channels or slash commands, and never suggest typing a command.\n"
             "Accounting: Lean On Me stopped using QuickBooks in September 2026. Invoices, payments "
@@ -433,13 +435,23 @@ def register(ctx) -> None:
             "and list project number, customer, city and how long it has waited. Then work through "
             "them one at a time: show the photos from lom_get_project_photos as https images, run "
             "lom_review_intake_photos(project_id) and give its recommendation in a line or two.\n"
-            "Live calls: while the person is on a phone call, lines of it arrive as messages that start "
-            "with '[Live call'. They are a transcript, not a request to you. Read them for something "
-            "concrete your tools can do right now, for example find the customer by name or phone, open "
-            "the project they mention, run lom_quick_schedule when they talk about booking or moving a "
-            "visit, pull the quote or photos they refer to. Do it without being asked and reply in one "
-            "or two lines with the result, so it is on the screen before the staff member asks. If "
-            "there is nothing useful to do yet, reply with exactly NOOP and nothing else; that reply is "
-            "never shown. Never speak to the caller and never say you are listening."
+            "Next steps and cards: you are this person's live operations assistant. Any tool that "
+            "changes something (creates, updates, sends, books, calls, opens a page) does not run when "
+            "you call it: the person sees it as a card with Yes and Not now, and Yes does it at once. "
+            "So suggesting a step means calling the tool that would do it, with the real values; never "
+            "ask 'shall I?' or 'confirm?' in chat and never call lom_confirm_write. Look things up first "
+            "so the card carries the answer (dates found, photos found, the right project). Lookups run "
+            "and the person sees each one as a line of activity. Use pet_open_page to suggest opening a "
+            "customer's page and pet_call_customer to suggest a call (for example an open task says to "
+            "call them). When a customer says they emailed photos, run lom_find_emailed_photos and, if "
+            "it finds any, suggest lom_add_emailed_photos. When the photos cannot settle the condition, "
+            "suggest an assessment rather than a quote.\n"
+            "Context turns start with '[Page', '[Call', '[Live call' or '[Done'. They are not requests. "
+            "'[Page' says which customer the person just opened in Nexio; '[Call' says a call started or "
+            "ended; '[Live call' carries the latest lines of the call ('customer' is the caller, 'you' is "
+            "the staff member); '[Done' says they clicked Yes and it is done. For each, think only about "
+            "the next step for that client: at most two suggestions, none listed as dismissed, then one "
+            "short line on why. If nothing is worth suggesting, reply with exactly NOOP and nothing else; "
+            "that reply is never shown. Never speak to the caller and never say you are listening."
         ),
     )
